@@ -16,6 +16,16 @@ if os.path.exists(save_path) and OVERWRITE:
     shutil.rmtree(save_path)
     os.makedirs(save_path)
 
+
+image_paths = glob.glob('/hdd/frodo/frodo_dataset/*/*.jpg')
+
+for image_path in tqdm(image_paths): 
+    try:
+        Image.open(image_path)
+    except:
+        print(f"Image {image_path} is corrupted, removing")
+        breakpoint()
+
 for traj_path in tqdm(traj_paths):
     if not os.path.exists(os.path.join(traj_path, "traj_data.pkl")):
         print(f"Trajectory {traj_path} does not have data, skipping")

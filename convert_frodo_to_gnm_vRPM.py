@@ -19,9 +19,9 @@ from scipy import ndimage as scipy
 import pickle as pkl
 import gc 
 
-ROBOT_L = 0.3
-ROBOT_WHEEL_R = 0.05
-ARROW_FACTOR = 2
+ROBOT_L = 0.206
+ROBOT_WHEEL_R = 0.065
+ARROW_FACTOR = 0.5
 ASPECT_RATIO = 4/3
 DOWNSAMPLE = 0.5
 
@@ -272,7 +272,7 @@ def convert_control_to_odom(lin_vels, ang_vels, rpms, timestamps):
         wheel_vel_r = np.mean([rpms[i,1], rpms[i,3]])*2*np.pi*ROBOT_WHEEL_R/60
 
         # Get the linear and angular velocities
-        w = (wheel_vel_r - wheel_vel_l)/ROBOT_L
+        w = (wheel_vel_l - wheel_vel_r)/ROBOT_L
         v = (wheel_vel_r + wheel_vel_l)/2 
 
         wheel_theta = wheel_theta + w * (timestamps[i] - timestamps[i-1])
@@ -357,16 +357,18 @@ def visualize_data(abs_pos, abs_yaw, filtered_odom, frame=None, save = False, id
         plt.savefig("viz_estimates.png")
     plt.close()
 
-def visualize_data_odom(vel_odom, wheel_odom):
+def visualize_data_odom(vel_odom, wheel_odom, utm):
 
     fig, ax = plt.subplots(1, 1, figsize=(10, 10))
     ax.plot(vel_odom[:,0], vel_odom[:,1], label="vel_odom")
     ax.plot(wheel_odom[:,0], wheel_odom[:,1], label="wheel_odom")
+    ax.plot(utm[:,0], utm[:,1], label="UTM")
     for i in range(0, len(vel_odom), 10):
         ax.arrow(vel_odom[i,0], vel_odom[i,1], np.cos(vel_odom[i,2]), np.sin(vel_odom[i,2]), head_width=0.1, head_length=0.2, fc='r', ec='r')
         ax.arrow(wheel_odom[i,0], wheel_odom[i,1], np.cos(wheel_odom[i,2]), np.sin(wheel_odom[i,2]), head_width=0.1, head_length=0.2, fc='b', ec='b')
         plt.legend()
     plt.savefig("odom_estimates.png")
+    plt.show()
     
 def transform_image(image):
     h,w = image.shape[:2]
@@ -466,6 +468,8 @@ def process_traj(path, output_path, viz=False):
     if len(control_data.timestamp) == 0: 
         print("No control data")
         return
+    integrated_odom, wheel_odom = convert_control_to_odom(control_data.linear, control_data.angular, control_data[["rpm_1", "rpm_2", "rpm_3", "rpm_4"]].values, control_data.timestamp)
+    print(f"Len of control data: {len(control_data.timestamp)}")
 
     # load gps csv file 
     try:
@@ -481,6 +485,7 @@ def process_traj(path, output_path, viz=False):
         return
     robot_utm = convert_gps_to_utm(gps_data.latitude, gps_data.longitude, gps_data.timestamp/1000)
     robot_utm[:,:2] = scipy.gaussian_filter1d(robot_utm[:,:2], 1.5, axis=0)
+    visualize_data_odom(integrated_odom, wheel_odom, robot_utm)
     robot_utm[:,2] = robot_utm[:,2] - 6 # offset to align with control data
     # Perform the kalman filter on the data
     filtered_odom = kalman_filter(control_data, robot_utm).squeeze(axis=2)
@@ -626,24 +631,24 @@ def main(args):
     else:
         os.makedirs(args.output_path, exist_ok=True)
 
-    # save_to_gnm_single_process(paths, args.output_path)
+    save_to_gnm_single_process(paths, args.output_path)
     # create tasks (see tqdm_multiprocess documenation)
-    tasks = [
-        (save_to_gnm, (shards[i], args.output_path))
-        for i in range(len(shards))
-        ]
+    # tasks = [
+    #     (save_to_gnm, (shards[i], args.output_path))
+    #     for i in range(len(shards))
+    #     ]
 
-    total_len = len(paths)
+    # total_len = len(paths)
 
-    # run tasks
-    pool = TqdmMultiProcessPool(args.num_workers) 
-    with tqdm.tqdm(
-        total=total_len,
-        dynamic_ncols=True,
-        position=0,
-        desc="Total progress",
-    ) as pbar:
-        pool.map(pbar, tasks, lambda _: None, lambda _: None) 
+    # # run tasks
+    # pool = TqdmMultiProcessPool(args.num_workers) 
+    # with tqdm.tqdm(
+    #     total=total_len,
+    #     dynamic_ncols=True,
+    #     position=0,
+    #     desc="Total progress",
+    # ) as pbar:
+    #     pool.map(pbar, tasks, lambda _: None, lambda _: None) 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

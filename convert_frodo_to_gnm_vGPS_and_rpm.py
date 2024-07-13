@@ -19,8 +19,8 @@ from scipy import ndimage as scipy
 import pickle as pkl
 import gc 
 
-ROBOT_L = 0.3
-ROBOT_WHEEL_R = 0.05
+ROBOT_L = 0.206
+ROBOT_WHEEL_R = 0.065
 ARROW_FACTOR = 2
 ASPECT_RATIO = 4/3
 DOWNSAMPLE = 0.5

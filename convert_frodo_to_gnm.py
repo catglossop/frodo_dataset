@@ -141,7 +141,7 @@ def kalman_filter(control_data, gps_data, compass_data=None):
     P_k = np.eye(3)
     Q = np.array([[0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1]])
     if compass_data is not None:
-        R = np.array([[5.0, 0, 0, 0], [0, 5.0, 0, 0], [0, 0, 0.1, 0], [0, 0, 0, 0.1]])
+        R = np.array([[5.0, 0, 0, 0], [0, 5.0, 0, 0], [0, 0, 0.1, 0], [0, 0, 0, 0.1]])*100
     else:
         R = np.array([[5.0, 0], [0, 5.0]])
     x_k = np.zeros((3,))
