@@ -13,49 +13,12 @@ from tqdm import tqdm
 
 path = "/hdd/frodo/frodo_dataset_control_only_clean"
 
-def PIL_to_base64(pil_image):
-    pil_image = pil_image.convert("RGB")
-    buffered = io.BytesIO()
-    pil_image.save(buffered, format="JPEG")
-    return base64.b64encode(buffered.getvalue()).decode() 
-
-def relabelling_vlm(images, client):
-    prompt = [{"type": "text", "text": "These images represent a trajectory of robot visual observations:"}]
-    
-    for i, image in enumerate(images):
-        if i == 0: 
-            image = image.convert("RGB")
-            image.save("images/start.jpg")
-        if i == len(images) - 1:
-            image = image.convert("RGB")
-            image.save("images/end.jpg")
-        image_base64 = PIL_to_base64(image)
-        prompt.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/jpeg;base64,{image_base64}",
-            },
-        })
-    
-    question = """ Given these series of frames, construct a descriptive label which describes the trajectory the robot has taken and where it ends. Keep the description simple and to the point, capturing key landmarks in the trajectory of the form "[instruction verb] (to the/the/into the etc.) [landmark]"
-                    Only return the final label."""
-    prompt.append({"type": "text", "text": question})
-
-    response = client.chat.completions.create(
-        model="gpt-4-turbo",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
-    label = response.choices[0].message.content
-    print(label)
-    breakpoint()
-    return label
-
 paths = glob.glob(os.path.join(path, "*"))
 total_stationary = 0
 total_control = 0
 skipped_folders = []
 waypoint_spacing = []
+avg_dt = []
 for folder in tqdm(paths): 
     shutil.rmtree("images", ignore_errors=True)
     os.makedirs(f"images")
@@ -80,14 +43,51 @@ for folder in tqdm(paths):
         continue
     for idx in range(1, data["position"].shape[0]):
         spacing = np.linalg.norm(data["position"][idx] - data["position"][idx - 1])
+        dt = data["timestamps"][idx] - data["timestamps"][idx - 1]
         waypoint_spacing.append(spacing)
+        avg_dt.append(dt)
 
 
 # Get the average spacing between waypoints
 avg_waypoint_spacing = np.array(waypoint_spacing).mean()
 print(f"Average waypoint spacing: {avg_waypoint_spacing:.2f} meters")
 print(f"Total number of skipped folders: {len(skipped_folders)}")
+print(f"Average dt: {np.array(avg_dt).mean()} seconds")
 print(skipped_folders)
+
+avg_dt = np.array(avg_dt).mean()
+print(f"Average dt: {avg_dt}")
+
+
+# Resample the data to have sample rate of 4 Hz 
+RATE = 4
+sampling_factor = np.ceil((1/RATE)/avg_dt)
+sampling_factor = 2
+
+print(f"Sampling factor: {sampling_factor}")
+breakpoint()
+for folder in tqdm(paths):
+    traj_data_path = os.path.join(folder, "traj_data.pkl")
+    with open(traj_data_path, "rb") as f:
+        traj_data = pkl.load(f)
+    traj_data_sampled = {
+        "position": traj_data["position"][::int(sampling_factor)],
+        "yaw": traj_data["yaw"][::int(sampling_factor)],
+        "timestamps": traj_data["timestamps"][::int(sampling_factor)],
+        "linear": traj_data["linear"],
+        "angular": traj_data["angular"],
+        "control_timestamps": traj_data["control_timestamps"],
+    }
+    pkl.dump(traj_data_sampled, open(traj_data_path, "wb"))
+    print(f"Resampled {folder}")
+
+
+
+
+
+
+
+
 
 
 

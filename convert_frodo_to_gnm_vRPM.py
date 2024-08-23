@@ -18,12 +18,17 @@ from PIL import Image
 from scipy import ndimage as scipy
 import pickle as pkl
 import gc 
+import numpy.ma as ma
+from typing import Dict
 
-ROBOT_L = 0.206
+ROBOT_L = 0.306
 ROBOT_WHEEL_R = 0.065
 ARROW_FACTOR = 0.5
 ASPECT_RATIO = 4/3
 DOWNSAMPLE = 0.5
+GIF_VIZ = False
+MAX_V = 0.83
+MAX_W = 0.9
 
 
 def get_traj_paths(input_path): 
@@ -32,8 +37,11 @@ def get_traj_paths(input_path):
 
     return paths
 
-def load_csv(path: str) -> pd.DataFrame:
-    return pd.read_csv(path, index_col=False)
+def load_csv(path: str) -> Dict:
+    dict_df = pd.read_csv(path, index_col=False).to_dict()
+    for key in dict_df.keys():
+        dict_df[key] = np.array(list(dict_df[key].values()))
+    return dict_df 
 
 def load_ts_video(path: str, odom_frame_timestamps, camera_data) -> np.ndarray:
 
@@ -51,10 +59,10 @@ def load_ts_video(path: str, odom_frame_timestamps, camera_data) -> np.ndarray:
             length = int(clip.get(cv2.CAP_PROP_FRAME_COUNT))
             total_length += length
             for i in range(length):
-                if idx >= len(camera_data.timestamp):
+                if idx >= camera_data["timestamp"].shape[0]:
                     break
-                timestamp = camera_data.timestamp[idx]
-                frame_idx = camera_data.frame_id[idx]
+                timestamp = camera_data["timestamp"][idx]
+                frame_idx = camera_data["frame_id"][idx]
                 _, frame = clip.read()
                 if timestamp not in odom_frame_timestamps:
                     idx += 1
@@ -64,7 +72,7 @@ def load_ts_video(path: str, odom_frame_timestamps, camera_data) -> np.ndarray:
                     continue
                 frames_dict[timestamp] = frame
                 idx += 1
-            if idx >= len(camera_data.timestamp):
+            if idx >= camera_data["timestamp"].shape[0]:
                 break
     missing_frames = []
     for x, timestamp in enumerate(odom_frame_timestamps):
@@ -81,7 +89,7 @@ def load_ts_video(path: str, odom_frame_timestamps, camera_data) -> np.ndarray:
     # print("Total frames: ", len(odom_frame_timestamps))
     # print("Unique timestamps: ", len(set(odom_frame_timestamps)))
     # print("Total frames in video: ", len(frames_dict.keys()))
-    # print("Total frames in CSV: ", len(camera_data.timestamp))
+    # print("Total frames in CSV: ", len(camera_data["timestamp"]))
     # print("Total length: ", total_length)
     # print("Number of none: ", none_cnt)
 
@@ -178,11 +186,11 @@ def kalman_filter(control_data, gps_data, compass_data=None):
     ## Find best alignment between initial datapoints
 
     # GPS and control  
-    timestamp_diff = np.abs(control_data.timestamp - gps_data[0,2])
+    timestamp_diff = np.abs(control_data["timestamp"] - gps_data[0,2])
     init_control_idx = np.argmin(timestamp_diff)
 
     # control and GPS 
-    timestamp_diff = np.abs(gps_data[:,2] - control_data.timestamp[init_control_idx])
+    timestamp_diff = np.abs(gps_data[:,2] - control_data["timestamp"][init_control_idx])
     init_gps_idx = np.argmin(timestamp_diff)
     gps_idx = init_gps_idx
     gps_data[:,:2] = gps_data[:,:2] - gps_data[init_gps_idx,:2]
@@ -193,23 +201,23 @@ def kalman_filter(control_data, gps_data, compass_data=None):
         compass_idx = np.argmin(timestamp_diff)
         compass_data[:,0] = compass_data[:,0] - compass_data[compass_idx,0]
     
-    filtered_odom = [np.vstack((x_k.reshape(-1,1), np.array(control_data.timestamp[init_control_idx]).reshape(-1,1)))]
+    filtered_odom = [np.vstack((x_k.reshape(-1,1), np.array(control_data["timestamp"][init_control_idx]).reshape(-1,1)))]
     
     # Loop through data to get filtered odom
-    for control_idx in range(init_control_idx + 1, len(control_data.timestamp[init_control_idx:])):
+    for control_idx in range(init_control_idx + 1, control_data["timestamp"][init_control_idx:].shape[0]):
         # Compute the wheel odom for the current time step 
-        v, w = convert_wheel_to_vel(control_data.rpm_1[control_idx], control_data.rpm_2[control_idx], control_data.rpm_3[control_idx], control_data.rpm_4[control_idx])
+        v, w = convert_wheel_to_vel(control_data["rpm_1"][control_idx], control_data["rpm_2"][control_idx], control_data["rpm_3"][control_idx], control_data["rpm_4"][control_idx])
 
         if gps_idx >= gps_data.shape[0]:
             break
         # Check if GPS data is available for the current time step
-        t_diff = control_data.timestamp[control_idx] - gps_data[gps_idx,2]
+        t_diff = control_data["timestamp"][control_idx] - gps_data[gps_idx,2]
         
         if (t_diff < 0.5 and t_diff > 0) or (gps_idx == init_gps_idx):
             if v == 0 and w == 0:
                 # control input is zero, so we don't have any new information: remove this data 
                 gps_idx +=1 
-                filtered_odom.append(np.vstack((x_k.reshape(-1,1), control_data.timestamp[control_idx].reshape(-1,1))))
+                filtered_odom.append(np.vstack((x_k.reshape(-1,1), control_data["timestamp"][control_idx].reshape(-1,1))))
                 continue
             
             # Prediction step
@@ -221,7 +229,7 @@ def kalman_filter(control_data, gps_data, compass_data=None):
             else: 
                 gps_sample = gps_data[gps_idx,:2]
 
-            dt = control_data.timestamp[control_idx] - control_data.timestamp[control_idx-1]
+            dt = control_data["timestamp"][control_idx] - control_data["timestamp"][control_idx-1]
             x_k_pred = np.array([x_k[0] + v*np.cos(x_k[2])*dt, x_k[1] + v*np.sin(x_k[2])*dt, x_k[2] + w*dt])
             J_fa = np.array([[1, 0, -v*np.sin(x_k[2])*dt], [0, 1, v*np.cos(x_k[2])*dt], [0, 0, 1]])
             P_k_pred = J_fa@P_k@J_fa.T + Q
@@ -240,10 +248,10 @@ def kalman_filter(control_data, gps_data, compass_data=None):
             P_k = (np.eye(K_k.shape[0]) - K_k@J_h)@P_k_pred
             gps_idx += 1
 
-            filtered_odom.append(np.vstack((x_k.reshape(-1,1), control_data.timestamp[control_idx].reshape(-1,1))))
+            filtered_odom.append(np.vstack((x_k.reshape(-1,1), control_data["timestamp"][control_idx].reshape(-1,1))))
         if t_diff >= 0.5: 
             # control data is too far ahead 
-            filtered_odom.append(np.vstack((x_k.reshape(-1,1), control_data.timestamp[control_idx].reshape(-1,1))))
+            filtered_odom.append(np.vstack((x_k.reshape(-1,1), control_data["timestamp"][control_idx].reshape(-1,1))))
             gps_idx +=1 
 
     filtered_odom = np.array(filtered_odom)
@@ -258,24 +266,25 @@ def convert_control_to_odom(lin_vels, ang_vels, rpms, timestamps):
     wheel_theta = 0
     robot_control_odom = []
     robot_wheel_odom = []
-    lin_vels = lin_vels*0.75
-    ang_vels = (ang_vels -0.02)*0.75
+    lin_vels = lin_vels*MAX_V # 3 km/h
+    ang_vels = ang_vels*MAX_W # 
     
-    for i in range(1,len(lin_vels)):
+    for i in range(1, lin_vels.shape[0]):
         # Integrate from control data to get odometry
         control_theta = control_theta + ang_vels[i-1] * (timestamps[i] - timestamps[i-1])
         control_x = control_x + lin_vels[i-1] * np.cos(control_theta) * (timestamps[i] - timestamps[i-1])
         control_y = control_y + lin_vels[i-1] * np.sin(control_theta) * (timestamps[i] - timestamps[i-1])
 
         # Integrate wheel encoders to get odometry
-        wheel_vel_l = np.mean([rpms[i,0], rpms[i,2]])*2*np.pi*ROBOT_WHEEL_R/60
-        wheel_vel_r = np.mean([rpms[i,1], rpms[i,3]])*2*np.pi*ROBOT_WHEEL_R/60
+        wheel_vel_l = np.mean([rpms[0,i], rpms[2,i]])*2*np.pi*ROBOT_WHEEL_R/60
+        wheel_vel_r = np.mean([rpms[1,i], rpms[3,i]])*2*np.pi*ROBOT_WHEEL_R/60
 
         # Get the linear and angular velocities
-        w = (wheel_vel_l - wheel_vel_r)/ROBOT_L
+        w = (wheel_vel_r - wheel_vel_l)/ROBOT_L
         v = (wheel_vel_r + wheel_vel_l)/2 
 
         wheel_theta = wheel_theta + w * (timestamps[i] - timestamps[i-1])
+
         wheel_x = wheel_x + v * np.cos(wheel_theta) * (timestamps[i] - timestamps[i-1])
         wheel_y = wheel_y + v * np.sin(wheel_theta) * (timestamps[i] - timestamps[i-1])
         
@@ -286,11 +295,11 @@ def convert_control_to_odom(lin_vels, ang_vels, rpms, timestamps):
 
 def compute_alignment(control_data, viz = False): 
 
-    approx_v, approx_w = convert_wheel_to_vel(control_data.rpm_1, control_data.rpm_2, control_data.rpm_3, control_data.rpm_4) 
-    control_vals = np.stack([control_data.linear, control_data.angular], axis=1)
+    approx_v, approx_w = convert_wheel_to_vel(control_data["rpm_1"], control_data["rpm_2"], control_data["rpm_3"], control_data["rpm_4"]) 
+    control_vals = np.stack([control_data["linear"], control_data["angular"]], axis=1)
 
     shifts = list(range(-100, 100))
-    dt = np.mean(np.diff(control_data.timestamp[int(len(control_data.timestamp)*0.2):]))
+    dt = np.mean(np.diff(control_data["timestamp"][int(control_data["timestamp"].shape[0]*0.2):]))
     correlations_control_rpms = []
     for shift in shifts:
         shifted_approx_v = approx_v[shift:] if shift >= 0 else approx_v[:shift]
@@ -307,8 +316,11 @@ def compute_alignment(control_data, viz = False):
         ax[0].axvline(shifts[np.argmax(correlations_control_rpms[...,0])], color='r')
         ax[0].axvline(shifts[np.argmax(correlations_control_rpms[...,1])], color='b')
         ax[0].legend()
+        ax[0].set_title("Alignment between control data and wheel odometry")
+        plt.savefig("alignment_control.png")
+        plt.close()
 
-    control_rpm_corr = np.max(correlations_control_rpms[...,0])
+    control_rpm_corr = np.max(correlations_control_rpms[...,0]) 
     control_rpm_corr_shift = shifts[np.argmax(correlations_control_rpms[...,0])]
 
     # Check for threshold correlations and align the data accordingly
@@ -316,20 +328,57 @@ def compute_alignment(control_data, viz = False):
         final_shift = control_rpm_corr_shift
     else:
         return control_data
+    control_df = {}
+    control_df["linear"] = np.array(control_data["linear"][final_shift:]) if final_shift >= 0 else control_data["linear"][:final_shift]
+    control_df["angular"] = np.array(control_data["angular"][final_shift:]) if final_shift >= 0 else control_data["angular"][:final_shift]
+    control_df["rpm_1"] = np.array(control_data["rpm_1"][:-final_shift]) if final_shift > 0 else control_data["rpm_1"][-final_shift:]
+    control_df["rpm_2"] = control_data["rpm_2"][:-final_shift] if final_shift > 0 else control_data["rpm_2"][-final_shift:]
+    control_df["rpm_3"] = control_data["rpm_3"][:-final_shift] if final_shift > 0 else control_data["rpm_3"][-final_shift:]
+    control_df["rpm_4"] = control_data["rpm_4"][:-final_shift] if final_shift > 0 else control_data["rpm_4"][-final_shift:]
+    control_df["timestamp"] = control_data["timestamp"][final_shift:] if final_shift >= 0 else control_data["timestamp"][:final_shift]
 
-    control_data.linear = control_data.linear[final_shift:] if final_shift >= 0 else control_data.linear[:final_shift]
-    control_data.angular = control_data.angular[final_shift:] if final_shift >= 0 else control_data.angular[:final_shift]
-    control_data.rpm_1 = control_data.rpm_1[:-final_shift] if final_shift > 0 else control_data.rpm_1[-final_shift:] 
-    control_data.rpm_2 = control_data.rpm_2[:-final_shift] if final_shift > 0 else control_data.rpm_2[-final_shift:]
-    control_data.rpm_3 = control_data.rpm_3[:-final_shift] if final_shift > 0 else control_data.rpm_3[-final_shift:]
-    control_data.rpm_4 = control_data.rpm_4[:-final_shift] if final_shift > 0 else control_data.rpm_4[-final_shift:]
-
-
-    if final_shift > 0:
-        control_data.timestamp = control_data.timestamp[final_shift:]
-    else:   
-        control_data.timestamp = control_data.timestamp[:final_shift]
     return control_data
+
+# def compute_alignment_optical_flow(control_data, optical_flow_data, viz = False): 
+#     control_vals = np.stack([control_data["linear"], control_data["angular"]], axis=1)
+#     control_vals = control_vals[1:,:]
+#     optical_flow_data[:,1] = optical_flow_data[:,1] * np.max(np.abs(MAX_V))
+#     print("Shape of control: ", control_vals.shape)
+#     print("Shape of optical flow: ", optical_flow_data.shape)
+#     shifts = list(range(-control_vals.shape[0], control_vals.shape[0]-1))
+#     if len(shifts) == 0:
+#         return 0
+#     correlations_control_opt = []
+
+#     for shift in shifts:
+#         shifted_opt_flow_w = optical_flow_data[shift:, 1] if shift >= 0 else optical_flow_data[:shift, 1]
+#         shifted_control_w = control_vals[:-shift, 1] if shift > 0 else control_vals[-shift:, 1]
+#         correlations_control_opt.append([np.corrcoef(shifted_opt_flow_w, shifted_control_w)[0, 1], 0])
+#     correlations_control_opt = np.array(correlations_control_opt)
+
+#     if viz: 
+#         fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
+#         ax.plot(shifts, correlations_control_opt[:,0], label="w")
+#         ax.axvline(shifts[np.argmax(correlations_control_opt[...,0])], color='r')
+#         ax.legend()
+
+#         plt.show()
+#     correlations_control_opt = np.array(correlations_control_opt)
+#     control_opt_corr = np.max(correlations_control_opt[...,0])
+#     control_opt_corr_shift = shifts[np.argmax(correlations_control_opt[...,0])]
+#     print("CONTROL OPT CORR: ", control_opt_corr)
+#     print("CONTROL OPT CORR SHIFT: ", control_opt_corr_shift)
+
+
+
+#     # Check for threshold correlations and align the data accordingly
+#     if control_opt_corr > 0.7: 
+#         final_shift =  control_opt_corr_shift
+
+#     dt = np.mean(np.diff(control_data["timestamp"]))*control_opt_corr_shift
+#     return dt 
+
 
 
 def convert_mag_to_yaw(compass):
@@ -344,7 +393,7 @@ def visualize_data(abs_pos, abs_yaw, filtered_odom, frame=None, save = False, id
     fig, ax = plt.subplots(1, 2, figsize=(20, 10))
     ax[0].plot(abs_pos[:,0], abs_pos[:,1], label="UTM")
     ax[0].plot(filtered_odom[:,0], filtered_odom[:,1], label="Filtered")
-    for i in range(0, len(filtered_odom)):
+    for i in range(0, filtered_odom.shape[0]):
         ax[0].arrow(filtered_odom[i,0], filtered_odom[i,1], np.cos(filtered_odom[i,2])*ARROW_FACTOR, np.sin(filtered_odom[i,2])*ARROW_FACTOR, head_width=0.1, head_length=0.2, fc='r', ec='r')
     plt.legend()
     ax[0].set_title("Position estimates")
@@ -357,18 +406,28 @@ def visualize_data(abs_pos, abs_yaw, filtered_odom, frame=None, save = False, id
         plt.savefig("viz_estimates.png")
     plt.close()
 
-def visualize_data_odom(vel_odom, wheel_odom, utm):
-
-    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-    ax.plot(vel_odom[:,0], vel_odom[:,1], label="vel_odom")
-    ax.plot(wheel_odom[:,0], wheel_odom[:,1], label="wheel_odom")
-    ax.plot(utm[:,0], utm[:,1], label="UTM")
-    for i in range(0, len(vel_odom), 10):
-        ax.arrow(vel_odom[i,0], vel_odom[i,1], np.cos(vel_odom[i,2]), np.sin(vel_odom[i,2]), head_width=0.1, head_length=0.2, fc='r', ec='r')
-        ax.arrow(wheel_odom[i,0], wheel_odom[i,1], np.cos(wheel_odom[i,2]), np.sin(wheel_odom[i,2]), head_width=0.1, head_length=0.2, fc='b', ec='b')
-        plt.legend()
-    plt.savefig("odom_estimates.png")
-    plt.show()
+def visualize_data_odom(vel_odom, wheel_odom, utm, frame=None, save=False, idx=0, folder_name=None, first=False):
+    fig, ax = plt.subplots(1, 2, figsize=(20, 10))
+    if idx%100 == 0: 
+        print(f"Processing frame {idx}")
+    ax[0].plot(vel_odom[:,0], vel_odom[:,1], label="vel_odom")
+    ax[0].plot(wheel_odom[:,0], wheel_odom[:,1], label="wheel_odom")
+    if utm is not None:
+        ax[0].plot(utm[:,0], utm[:,1], label="UTM")
+    for i in range(0, vel_odom.shape[0], 10):
+        ax[0].arrow(vel_odom[i,0], vel_odom[i,1], np.cos(vel_odom[i,2]), np.sin(vel_odom[i,2]), head_width=0.1, head_length=0.2, fc='r', ec='r')
+        ax[0].arrow(wheel_odom[i,0], wheel_odom[i,1], np.cos(wheel_odom[i,2]), np.sin(wheel_odom[i,2]), head_width=0.1, head_length=0.2, fc='b', ec='b')
+    ax[0].legend()
+    ax[0].set_title("Position estimates")
+    if frame is not None:
+        ax[1].imshow(frame)
+        ax[1].set_title("Frame")
+    if save: 
+        os.makedirs(f"viz_{folder_name}", exist_ok=True)
+        plt.savefig(f"viz_{folder_name}/viz_{idx}.png") 
+    if first: 
+        plt.savefig(f"viz_estimates.png")   
+    plt.close()
     
 def transform_image(image):
     h,w = image.shape[:2]
@@ -391,61 +450,70 @@ def visualize_control(control_data, left_right_optical_flow):
     rpm_ws = []
     input_vs = []
     input_ws = []
-    for idx, timestamp in enumerate(control_data.timestamp):
-        rpm_v, rpm_w = convert_wheel_to_vel(control_data.rpm_1[idx], control_data.rpm_2[idx], control_data.rpm_3[idx], control_data.rpm_4[idx])
-        input_v = control_data.linear[idx]
-        input_w = control_data.angular[idx]
+    for idx, timestamp in enumerate(control_data["timestamp"]):
+        rpm_v, rpm_w = convert_wheel_to_vel(control_data["rpm_1"][idx], control_data["rpm_2"][idx], control_data["rpm_3"][idx], control_data["rpm_4"][idx])
+        input_v = control_data["linear"][idx]
+        input_w = control_data["angular"][idx]
         rpm_vs.append(rpm_v)
         rpm_ws.append(rpm_w)
         input_vs.append(input_v)
         input_ws.append(input_w)
     fig, ax = plt.subplots(2, 1, figsize=(10, 10))
-    ax[0].plot(control_data.timestamp, rpm_vs, label="RPM v")
-    ax[0].plot(control_data.timestamp, input_vs, label="Input v")
-    ax[1].plot(control_data.timestamp, rpm_ws, label="RPM w")
-    ax[1].plot(control_data.timestamp, input_ws, label="Input w")
+    ax[0].plot(control_data["timestamp"], rpm_vs, label="RPM v")
+    ax[0].plot(control_data["timestamp"], input_vs, label="Input v")
+    ax[1].plot(control_data["timestamp"], rpm_ws, label="RPM w")
+    ax[1].plot(control_data["timestamp"], input_ws, label="Input w")
     ax[1].plot(left_right_optical_flow[:,0], left_right_optical_flow[:,1], label="Optical flow left")
     plt.legend()
     plt.savefig("control_estimates.png")
     plt.close()
 
-def get_optical_flow(video_data, frame_timestamps, control_data):
-    feature_params = dict( maxCorners = 100,
-        qualityLevel = 0.3,
-        minDistance = 7,
-        blockSize = 7)
-    left_right_optical_flow = []
-    for i in range(1, frame_timestamps.shape[0]):
-        # Calculate optical flow
-        prev = cv2.cvtColor(video_data[frame_timestamps[i-1]], cv2.COLOR_RGB2GRAY)
-        next = cv2.cvtColor(video_data[frame_timestamps[i]], cv2.COLOR_RGB2GRAY)
-        p0 = cv2.goodFeaturesToTrack(prev, mask = None, **feature_params)
-        if p0 is None:
-            left_right_optical_flow.append(np.array([0, 0]))
-            continue
-        p1, st, err = cv2.calcOpticalFlowPyrLK(prev, next, p0, None)
-        # Select good points
-        if p1 is not None:
-            good_new = p1[st==1]
-            good_old = p0[st==1]
-        flow = good_new - good_old
-        if flow.shape[0] == 0:
-            left_right_optical_flow.append(np.array([0, 0]))
-            continue
-        left_right_optical_flow.append(flow.mean(axis=0))
-    left_right_optical_flow = np.array(left_right_optical_flow)
-    left_right_optical_flow = left_right_optical_flow/np.max(np.abs(left_right_optical_flow))
-    left_right_optical_flow = np.hstack((frame_timestamps[1:].reshape(-1,1), left_right_optical_flow))
-    optical_flow_with_control_timestamps = []
-    cursor = 0
-    for i in range(len(control_data.timestamp)):
-        while frame_timestamps[cursor] < control_data.timestamp[i] and cursor < len(frame_timestamps):
-            cursor += 1
-        if cursor >= len(frame_timestamps):
-            break
-        optical_flow_with_control_timestamps.append(left_right_optical_flow[cursor])
-    optical_flow_with_control_timestamps = np.array(optical_flow_with_control_timestamps)
-    return optical_flow_with_control_timestamps
+# def get_optical_flow(frames):
+#     feature_params = dict( maxCorners = 100,
+#         qualityLevel = 0.3,
+#         minDistance = 7,
+#         blockSize = 7)
+#     left_right_optical_flow = []
+#     for i in range(1, len(frames)):
+#         # Calculate optical flow
+#         prev = cv2.cvtColor(frames[i-1], cv2.COLOR_RGB2GRAY)
+#         next = cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY)
+#         p0 = cv2.goodFeaturesToTrack(prev, mask = None, **feature_params)
+#         if p0 is None:
+#             left_right_optical_flow.append(np.array([0, 0]))
+#             print("No features found")
+#             continue
+#         p1, st, err = cv2.calcOpticalFlowPyrLK(prev, next, p0, None)
+
+#         # Select good points
+#         if p1 is not None:
+#             good_new = p1[st==1]
+#             good_old = p0[st==1]
+#         flow = good_new - good_old
+#         if flow.shape[0] == 0:
+#             left_right_optical_flow.append(np.array([0, 0]))
+#             print("No flow found")
+#             continue
+#         left_right_optical_flow.append(flow.mean(axis=0))
+#     left_right_optical_flow = np.array(left_right_optical_flow)
+#     left_right_optical_flow = left_right_optical_flow/np.max(np.abs(left_right_optical_flow))
+#     return left_right_optical_flow
+
+def remove_nans(data):
+    input_nan_mask = np.logical_or(ma.masked_invalid(np.array(data["linear"])).mask, ma.masked_invalid(np.array(data["angular"])).mask)
+    print(f"Removed {np.sum(input_nan_mask)} samples with nans from trajectory")
+    rpm_nan_mask = np.logical_or(np.logical_or(ma.masked_invalid(np.array(data["rpm_1"])).mask, ma.masked_invalid(np.array(data["rpm_2"])).mask), np.logical_or(ma.masked_invalid(np.array(data["rpm_3"])).mask, ma.masked_invalid(np.array(data["rpm_4"])).mask))
+    nan_mask = np.logical_not(np.logical_or(input_nan_mask, rpm_nan_mask))
+
+    data["linear"] = data["linear"][nan_mask]
+    data["angular"] = data["angular"][nan_mask]
+    data["rpm_1"] = data["rpm_1"][nan_mask]
+    data["rpm_2"] = data["rpm_2"][nan_mask]
+    data["rpm_3"] = data["rpm_3"][nan_mask]
+    data["rpm_4"] = data["rpm_4"][nan_mask]
+    data["timestamp"] = data["timestamp"][nan_mask]
+
+    return data
 
 def process_traj(path, output_path, viz=False):
 
@@ -465,33 +533,12 @@ def process_traj(path, output_path, viz=False):
     except:
         return
     control_data = load_csv(control_path)
-    if len(control_data.timestamp) == 0: 
+    if control_data["timestamp"].shape[0] == 0: 
         print("No control data")
         return
-    integrated_odom, wheel_odom = convert_control_to_odom(control_data.linear, control_data.angular, control_data[["rpm_1", "rpm_2", "rpm_3", "rpm_4"]].values, control_data.timestamp)
-    print(f"Len of control data: {len(control_data.timestamp)}")
-
-    # load gps csv file 
-    try:
-        gps_path = glob.glob(path + "/gps_data_*.csv")[0]
-    except:
-        return
-
-    gps_data = load_csv(gps_path)
-    if len(gps_data.timestamp) == 0:
-        return
-    if gps_data.latitude[0] < -80 or gps_data.latitude[0] > 84 or gps_data.longitude[0] < -180 or gps_data.longitude[0] > 180:
-        print("GPS data is invalid")
-        return
-    robot_utm = convert_gps_to_utm(gps_data.latitude, gps_data.longitude, gps_data.timestamp/1000)
-    robot_utm[:,:2] = scipy.gaussian_filter1d(robot_utm[:,:2], 1.5, axis=0)
-    visualize_data_odom(integrated_odom, wheel_odom, robot_utm)
-    robot_utm[:,2] = robot_utm[:,2] - 6 # offset to align with control data
-    # Perform the kalman filter on the data
-    filtered_odom = kalman_filter(control_data, robot_utm).squeeze(axis=2)
-
-    odom_yaw = np.array([np.arctan2(filtered_odom[i,1] - filtered_odom[i-1,1], filtered_odom[i,0] - filtered_odom[i-1,0]) for i in range(1, len(filtered_odom))])
-    filtered_odom[1:,2] = odom_yaw
+    control_data = remove_nans(control_data)
+    control_data = compute_alignment(control_data, viz=True)
+    control_data["timestamp"] = control_data["timestamp"] - 0.5
 
     # load front camera csv file
     try:
@@ -501,98 +548,126 @@ def process_traj(path, output_path, viz=False):
         return
 
     front_camera_data = load_csv(front_camera_path)
-    if len(front_camera_data.timestamp) == 0:
+    if front_camera_data["timestamp"].shape[0] == 0:
         print("No front camera data")
         return
 
     # load video data 
-    odom_timestamps = filtered_odom[:,3]
-    odom_frame_timestamps = []
-    first_frame_timestamp = front_camera_data.timestamp[0]
-    odom_mask = np.where((odom_timestamps - first_frame_timestamp) < -0.1,1,0)
-    filtered_odom = filtered_odom[odom_mask == 0, ...]
-    odom_timestamps = filtered_odom[:,3]
-    filtered_odom_unique = np.unique(odom_timestamps, return_index=True)
-    odom_timestamps = filtered_odom_unique[0]
-    filtered_odom = filtered_odom[filtered_odom_unique[1], ...]
+    control_timestamps = control_data["timestamp"]
+    control_frame_timestamps = []
+    first_frame_timestamp = front_camera_data["timestamp"][0]
+    control_mask = np.where((control_timestamps - first_frame_timestamp) < -0.1,1,0)
+    for key in control_data.keys():
+        control_data[key] = control_data[key][control_mask == 0,...]
+    control_timestamps = control_data["timestamp"]
+    control_unique = np.unique(control_timestamps, return_index=True)
+    control_timestamps = control_unique[0]
+    for keys in control_data.keys():
+        control_data[keys] = control_data[keys][control_unique[1], ...]
+
     safe = []
-    for idx, timestamp in enumerate(odom_timestamps):
-        time_diff = np.abs(front_camera_data.timestamp - timestamp, dtype=np.float64)
+    control_frame_timestamps = []
+    for idx, timestamp in enumerate(control_timestamps):
+        time_diff = np.abs(front_camera_data["timestamp"] - timestamp, dtype=np.float64)
         frame_idx = np.argmin(time_diff)
         min_time_diff = time_diff[frame_idx]
         if min_time_diff > 0.1:
             continue
         else:
             safe.append(idx)
-        odom_frame_timestamps.append(front_camera_data.timestamp[frame_idx])
+        control_frame_timestamps.append(front_camera_data["timestamp"][frame_idx])
 
     safe = np.array(safe)
-    if len(safe) == 0:
+    if safe.shape[0] == 0:
         return
-    filtered_odom = filtered_odom[safe, ...]
-    odom_frame_timestamps = np.array(odom_frame_timestamps, dtype=np.float64)
-    if len(odom_frame_timestamps) == 0:
+    for keys in control_data.keys():
+        control_data[keys] = control_data[keys][safe,...]
+    control_frame_timestamps = np.array(control_frame_timestamps, dtype=np.float64)
+    if control_frame_timestamps.shape[0] == 0:
         print("No video data")
         return
+    
+    integrated_odom, wheel_odom = convert_control_to_odom(control_data["linear"], control_data["angular"], np.vstack((control_data["rpm_1"], control_data["rpm_2"], control_data["rpm_3"], control_data["rpm_4"])), control_data["timestamp"])
+    if integrated_odom.shape[0] == 0:
+        print("No odometry data")
+        return
 
-    video_data, missing_frames = load_ts_video(path, odom_frame_timestamps, front_camera_data)
+    control_frame_timestamps = control_frame_timestamps[1:]
+    control_timestamps = control_data["timestamp"][1:]
+    
+    assert control_frame_timestamps.shape[0] == control_timestamps.shape[0], "Length of control data and video data do not match"
+
+    video_data, missing_frames = load_ts_video(path, control_frame_timestamps, front_camera_data)
     frame_timestamps = np.array(list(video_data.keys()), dtype=np.float64)
-    control_data = compute_alignment(control_data)
 
     # update filtered odom based on repeated timestamps
-    mask = np.ones(filtered_odom.shape[0], dtype=bool)
+    mask = np.ones(control_timestamps.shape[0], dtype=bool)
     if len(missing_frames) != 0:
         print("Missing frames: ", missing_frames)
         mask[missing_frames] = False
-        filtered_odom = filtered_odom[mask,...]
-        odom_frame_timestamps = odom_frame_timestamps[mask]
+        integrated_odom = integrated_odom[mask,...]
+        control_timestamps = control_timestamps[mask]
+        control_frame_timestamps = control_frame_timestamps[mask]
     
-    for idx, timestamp in enumerate(odom_frame_timestamps):
+    for idx, timestamp in enumerate(control_frame_timestamps):
         if timestamp != frame_timestamps[idx]:
             print("mismatch!")
             breakpoint()
 
-    assert filtered_odom.shape[0] == frame_timestamps.shape[0], f"Length of odom {filtered_odom.shape[0]} and video data {frame_timestamps.shape[0]} do not match"
-    assert filtered_odom.shape[0] ==  len(video_data.keys()), "Length of odom and control data do not match"
-
+    assert integrated_odom.shape[0] == frame_timestamps.shape[0], f"Length of odom {integrated_odom.shape[0]} and video data {frame_timestamps.shape[0]} do not match"
+    assert integrated_odom.shape[0] ==  len(video_data.keys()), "Length of odom and video do not match"
+    frames = []
     for idx, timestamp in enumerate(frame_timestamps):
         frame = video_data[timestamp]
         if frame is None:
-            print(f"{idx} of {len(odom_frame_timestamps)}")
+            print(f"{idx} of {control_frame_timestamps.shape[0]}")
             print("None frame")
             continue
         frame = transform_image(frame)
+        frames.append(frame)
+        if GIF_VIZ:
+            visualize_data_odom(integrated_odom[:idx+1], wheel_odom[:idx+1], None, frame, save=True, idx=idx, folder_name=folder_name, first=idx==0)
         cv2.imwrite(f"{output_path}/{folder_name}/{idx}.jpg", frame)
+
+    if GIF_VIZ:
+        print("Creating gif") 
+        gif_frames = []
+        paths = glob.glob(f"viz_{folder_name}/*")
+        paths = sorted(paths, key=lambda x: int(x.strip(".png").split("/")[-1].split("_")[-1]))
+        for file in paths:
+            gif_frames.append(Image.open(file))
+        
+        gif_frames[0].save(f"trajectory_{folder_name}.gif", save_all=True, append_images=gif_frames[1:], duration=200, loop=0)
     
     traj_dict = {}
-    traj_dict["pos"] = filtered_odom[:,:2]
-    traj_dict["yaw"] = filtered_odom[:,2]
-    traj_dict["timestamps"] = filtered_odom[:,3]
-    traj_dict["linear"] = control_data.linear
-    traj_dict["angular"] = control_data.angular
-    traj_dict["rpm_1"] = control_data.rpm_1
-    traj_dict["rpm_2"] = control_data.rpm_2
-    traj_dict["rpm_3"] = control_data.rpm_3 
-    traj_dict["rpm_4"] = control_data.rpm_4
-    traj_dict["control_timestamps"] = control_data.timestamp
+    traj_dict["pos"] = integrated_odom[:,:2]
+    traj_dict["yaw"] = integrated_odom[:,2]
+    traj_dict["timestamps"] = frame_timestamps
+    traj_dict["linear"] = control_data["linear"]
+    traj_dict["angular"] = control_data["angular"]
+    traj_dict["rpm_1"] = control_data["rpm_1"]
+    traj_dict["rpm_2"] = control_data["rpm_2"]
+    traj_dict["rpm_3"] = control_data["rpm_3"] 
+    traj_dict["rpm_4"] = control_data["rpm_4"]
+    traj_dict["control_timestamps"] = control_data["timestamp"]
 
     pkl.dump(traj_dict, open(f"{output_path}/{folder_name}/traj_data.pkl", "wb"))
 
     # save some stats for dataset info
-    stationary_control = np.sum(np.logical_and(np.where(control_data.linear == 0, 1, 0), np.where(control_data.angular == 0, 1, 0)))
-    total_control = len(control_data.linear)
+    stationary_control = np.sum(np.logical_and(np.where(control_data["linear"] == 0, 1, 0), np.where(control_data["angular"] == 0, 1, 0)))
+    total_control = control_data["linear"].shape[0]
     ratio = stationary_control/total_control
     traj_stats = {"stationary_control": stationary_control, 
                   "total_control": total_control, 
                   "ratio": ratio, 
                   "total_frames": frame_timestamps.shape[0], 
-                  "total_odom": filtered_odom.shape[0], 
-                  "avg delta time": np.mean(np.diff(filtered_odom[:,3])), 
+                  "total_odom": control_data["timestamp"].shape[0], 
+                  "avg delta time": np.mean(np.diff(control_data["timestamp"])), 
                   "missing_frames": missing_frames,}
     print(traj_stats)
-    pkl.dump(traj_stats, open(f"{output_path}/{folder_name}/traj_stats.pkl", "wb"))\
+    pkl.dump(traj_stats, open(f"{output_path}/{folder_name}/traj_stats.pkl", "wb"))
     
-    del control_data, gps_data, robot_utm, front_camera_data, video_data, filtered_odom
+    del control_data, front_camera_data, video_data
     gc.collect()
 
 
@@ -631,24 +706,24 @@ def main(args):
     else:
         os.makedirs(args.output_path, exist_ok=True)
 
-    save_to_gnm_single_process(paths, args.output_path)
+    # save_to_gnm_single_process(paths, args.output_path)
     # create tasks (see tqdm_multiprocess documenation)
-    # tasks = [
-    #     (save_to_gnm, (shards[i], args.output_path))
-    #     for i in range(len(shards))
-    #     ]
+    tasks = [
+        (save_to_gnm, (shards[i], args.output_path))
+        for i in range(len(shards))
+        ]
 
-    # total_len = len(paths)
+    total_len = len(paths)
 
-    # # run tasks
-    # pool = TqdmMultiProcessPool(args.num_workers) 
-    # with tqdm.tqdm(
-    #     total=total_len,
-    #     dynamic_ncols=True,
-    #     position=0,
-    #     desc="Total progress",
-    # ) as pbar:
-    #     pool.map(pbar, tasks, lambda _: None, lambda _: None) 
+    # run tasks
+    pool = TqdmMultiProcessPool(args.num_workers) 
+    with tqdm.tqdm(
+        total=total_len,
+        dynamic_ncols=True,
+        position=0,
+        desc="Total progress",
+    ) as pbar:
+        pool.map(pbar, tasks, lambda _: None, lambda _: None) 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
