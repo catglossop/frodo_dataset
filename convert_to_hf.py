@@ -173,10 +173,10 @@ def concat_videos_commands(all_rides, output_dir: Path):
 
     camera_specific_ffmpeg_args = {
         "front": {
-            "filter:v": "scale=224:128",
+            "filter:v": "scale=540:360", # "scale=224:128",
         },
         "rear": {
-            "filter:v": "scale=96:64",
+            "filter:v": "scale=192:128", # "scale=96:64",
         },
     }
 
@@ -605,7 +605,8 @@ if __name__ == "__main__":
     raw_data_dir = Path("/ephemeral/frodobots_v2")
 
     dataset_id = "frodobots_dataset"
-    out_root_dir = Path("/ephemeral/frodobots_v2_export") / dataset_id
+    # out_root_dir = Path("/ephemeral/frodobots_v2_export") / dataset_id
+    out_root_dir = Path("/mnt/ephemeral2/frodobots_v2_export") / dataset_id
 
     split_dir = out_root_dir / "train"
     videos_dir = out_root_dir / "videos"
